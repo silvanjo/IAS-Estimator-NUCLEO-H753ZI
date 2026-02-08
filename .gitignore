@@ -1,0 +1,28 @@
+# Build artifacts
+STM/build/
+*.o
+*.d
+*.lst
+*.elf
+*.bin
+*.hex
+*.map
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+*.swp
+*~
+
+# STM32CubeMX
+STM/.mxproject
