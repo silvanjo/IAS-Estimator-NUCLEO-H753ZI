@@ -75,6 +75,9 @@ endif
 ######################################
 # C sources
 C_SOURCES =  \
+Core/Libs/ssd1306/ssd1306.c \
+Core/Libs/ssd1306/ssd1306_fonts.c \
+Core/Libs/ssd1306/ssd1306_tests.c \
 Core/Src/main.c \
 Core/Src/stm32h7xx_hal_msp.c \
 Core/Src/stm32h7xx_it.c \
@@ -211,6 +214,7 @@ AS_INCLUDES = \
 # C includes
 C_INCLUDES =  \
 -ICore/Inc \
+-ICore/Libs/ssd1306 \
 -IDrivers/BSP/STM32H7xx_Nucleo \
 -IDrivers/CMSIS/DSP/Include \
 -IDrivers/CMSIS/DSP/Include/dsp \
