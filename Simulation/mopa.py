@@ -29,16 +29,7 @@ def normalize_spectrum(Sxx):
     rms = np.sqrt(np.mean(Sxx**2))
     return Sxx / rms if rms > 0 else Sxx
 
-def compute_pdf(Axx, f, orders, min_omega, max_omega, nomega=1000, freq_bias_strength=0.75):
-    """
-    Compute PDF with optional linear frequency bias.
-    
-    freq_bias_strength: Controls preference for lower frequencies
-        0.0 = no bias
-        1.0 = full linear bias (weight goes from 1 at 0 Hz to 0 at f_max)
-        
-    The weight applied to each magnitude is: weight = 1 - strength * (freq / f_max)
-    """
+def compute_pdf(Axx, f, orders, min_omega, max_omega, nomega=1000):
     f_max = f[-1]
     omega = np.linspace(min_omega, max_omega, nomega)
     interpolated_spectrum = interp1d(f, Axx)
@@ -49,13 +40,6 @@ def compute_pdf(Axx, f, orders, min_omega, max_omega, nomega=1000, freq_bias_str
             freq = order * w
             if freq < f_max:
                 magnitude = max(interpolated_spectrum(freq), 1e-10)
-                
-                # Apply linear frequency bias to prefer lower frequencies
-                if freq_bias_strength > 0:
-                    weight = 1.0 - freq_bias_strength * (freq / f_max)
-                    weight = max(weight, 0.01)
-                    magnitude *= weight
-                
                 pdf[i] *= magnitude
 
     total = np.trapezoid(pdf, omega)
@@ -65,13 +49,13 @@ def compute_pdf(Axx, f, orders, min_omega, max_omega, nomega=1000, freq_bias_str
 
     return normalized_pdf, omega
 
-def compute_pdf_map(Sxx, f, orders, min_omega, max_omega, freq_bias_strength=0.75):
+def compute_pdf_map(Sxx, f, orders, min_omega, max_omega):
     _, n_time = Sxx.shape
-    
+
     pdf_map = None
     for i in range(n_time):
         Axx = Sxx[:,i]
-        pdf, omega = compute_pdf(Axx, f, orders, min_omega, max_omega, freq_bias_strength=freq_bias_strength)
+        pdf, omega = compute_pdf(Axx, f, orders, min_omega, max_omega)
 
         if pdf_map is None:
             pdf_map = np.zeros((len(omega), n_time))
@@ -80,30 +64,38 @@ def compute_pdf_map(Sxx, f, orders, min_omega, max_omega, freq_bias_strength=0.7
 
     return pdf_map, omega
 
-def compute_ias(pdf_map, omega, sigma=0.5, weight=30.0, Sxx=None, amplitude_threshold=None, wait_steps=2):
+def rms_to_omega(rms, min_omega, max_omega, rms_max=2.0):
+    return min_omega + (max_omega - min_omega) * np.clip(rms / rms_max, 0, 1)
+
+def compute_ias(pdf_map, omega, Sxx, min_omega=5, max_omega=24,
+                t_sigma=0.5, t_weight=40.0,
+                r_sigma=1.0, r_weight=15.0, disagree_threshold=3.0,
+                rms_threshold=0.18, wait_steps=3):
     _, n_time = pdf_map.shape
     ias = np.zeros(n_time)
-    
-    # First compute raw IAS estimates
+
+    rms = np.sqrt(np.mean(Sxx**2, axis=0))
+    omega_from_rms = rms_to_omega(rms, min_omega, max_omega)
+
     raw_ias = np.zeros(n_time)
     raw_ias[0] = omega[np.argmax(pdf_map[:,0])]
 
     for i in range(1, n_time):
-        gaussian_bell = np.exp(-(omega - raw_ias[i-1])**2 / (2*sigma**2))
-        biased_pdf = pdf_map[:,i-1] * (1 + gaussian_bell * weight)
+        tracking_g = np.exp(-(omega - raw_ias[i-1])**2 / (2*t_sigma**2))
+
+        disagreement = abs(raw_ias[i-1] - omega_from_rms[i])
+        if disagreement > disagree_threshold:
+            rms_g = np.exp(-(omega - omega_from_rms[i])**2 / (2*r_sigma**2))
+            biased_pdf = pdf_map[:,i] * (1 + tracking_g * t_weight) * (1 + rms_g * r_weight)
+        else:
+            biased_pdf = pdf_map[:,i] * (1 + tracking_g * t_weight)
+
         raw_ias[i] = omega[np.argmax(biased_pdf)]
 
-    # Compute zero mask based on amplitude threshold
-    if Sxx is not None and amplitude_threshold is not None:
-        max_amplitude = np.max(Sxx, axis=0)
-        should_be_zero = max_amplitude < amplitude_threshold
-    else:
-        should_be_zero = np.zeros(n_time, dtype=bool)
-    
-    # Apply hysteresis: if previous was zero, wait for consecutive non-zero steps
+    should_be_zero = rms < rms_threshold
     consecutive_nonzero = 0
     was_zero = True
-    
+
     for i in range(n_time):
         if should_be_zero[i]:
             ias[i] = 0.0
@@ -119,7 +111,7 @@ def compute_ias(pdf_map, omega, sigma=0.5, weight=30.0, Sxx=None, amplitude_thre
                     ias[i] = 0.0
             else:
                 ias[i] = raw_ias[i]
-    
+
     return ias
 
 if __name__ == "__main__":
@@ -140,15 +132,15 @@ if __name__ == "__main__":
     plt.show()
 
     orders = [1, 4]
-    min_omega, max_omega = 5, 24 
+    min_omega, max_omega = 5, 24
 
-    pdf_map, omega = compute_pdf_map(Sxx_normalized, f, orders, min_omega, max_omega, freq_bias_strength=0.75)
+    pdf_map, omega = compute_pdf_map(Sxx_normalized, f, orders, min_omega, max_omega)
 
     plt.figure()
     plt.pcolormesh(t, omega, pdf_map)
     plt.show()
 
-    ias = compute_ias(pdf_map, omega, Sxx=Sxx_normalized, amplitude_threshold=1.0, wait_steps=2)
+    ias = compute_ias(pdf_map, omega, Sxx_normalized, min_omega=min_omega, max_omega=max_omega)
 
     # Save IAS speed estimation to CSV file
     output_path = "ias_speed_estimation_rampenfunktion.csv"

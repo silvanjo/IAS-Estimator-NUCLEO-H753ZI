@@ -39,14 +39,19 @@
 #define ADC_BUFFER_SIZE 2048
 #define FFT_SIZE ADC_BUFFER_SIZE
 
-/* MOPA Algorithm parameters */
-#define SAMPLE_RATE 2000.0f        /* Sample rate in Hz */
-#define MIN_OMEGA 10.0f            /* Minimum angular frequency (Hz) */
-#define MAX_OMEGA 100.0f           /* Maximum angular frequency (Hz) */
-#define N_OMEGA 100                /* Number of omega candidates */
-#define N_ORDERS 3                 /* Number of harmonic orders */
-#define SIGMA_HZ 10.0f             /* Gaussian prior smoothing parameter */
-#define PRIOR_WEIGHT 2.0f          /* Weight for Gaussian prior */
+#define SAMPLE_RATE 2000.0f
+#define MIN_OMEGA 5.0f
+#define MAX_OMEGA 24.0f
+#define N_OMEGA 100
+#define N_ORDERS 2
+#define TRACKING_SIGMA 0.5f
+#define TRACKING_WEIGHT 40.0f
+#define RMS_SIGMA 1.0f
+#define RMS_WEIGHT 15.0f
+#define RMS_MAX 320.0f
+#define DISAGREE_THRESHOLD 3.0f
+#define AMPLITUDE_THRESHOLD 20.0f
+#define WAIT_STEPS 3
 
 /* Voltage measurement */
 #define VREF 3.3f
@@ -82,19 +87,20 @@ float32_t hann_window[FFT_SIZE];
 
 arm_rfft_fast_instance_f32 fft_instance;
 
-/* MOPA Algorithm buffers */
-static const uint8_t mopa_orders[N_ORDERS] = {1, 2, 3};  /* Harmonic orders to consider */
-float32_t mopa_omega[N_OMEGA];              /* Omega candidate values */
-float32_t mopa_pdf[N_OMEGA];                /* PDF for current frame */
-float32_t mopa_biased_pdf[N_OMEGA];         /* Biased PDF with Gaussian prior */
-float32_t mopa_prev_ias = 0.0f;             /* Previous IAS estimate for smoothing */
-float32_t mopa_current_ias = 0.0f;          /* Current IAS estimate */
-volatile uint8_t mopa_ias_ready = 0;        /* Flag: IAS estimate ready */
-uint8_t mopa_initialized = 0;               /* Flag: MOPA omega vector initialized */
+static const uint8_t mopa_orders[N_ORDERS] = {1, 4};
+float32_t mopa_omega[N_OMEGA];
+float32_t mopa_pdf[N_OMEGA];
+float32_t mopa_biased_pdf[N_OMEGA];
+float32_t mopa_prev_ias = 0.0f;
+float32_t mopa_current_ias = 0.0f;
+volatile uint8_t mopa_ias_ready = 0;
+uint8_t mopa_initialized = 0;
 
-/* Spectrum parameters (calculated from FFT) */
-float32_t spectrum_df = 0.0f;               /* Frequency resolution (Hz per bin) */
-float32_t spectrum_max_freq = 0.0f;         /* Maximum frequency in spectrum */
+float32_t spectrum_df = 0.0f;
+float32_t spectrum_max_freq = 0.0f;
+float32_t mopa_frame_rms = 0.0f;
+uint8_t mopa_was_zero = 1;
+uint16_t mopa_consecutive_nonzero = 0;
 
 /* USER CODE END PV */
 
@@ -111,6 +117,7 @@ static void mopa_init(void);
 static void normalize_spectrum(void);
 static float32_t interp_spectrum(float32_t freq);
 static void compute_pdf_map(void);
+static float32_t rms_to_omega(float32_t rms);
 static float32_t extract_ias(void);
 
 /* USER CODE END PFP */
@@ -188,15 +195,9 @@ void process_fft(uint16_t* input, uint32_t offset)
 
   // Run MOPA algorithm
   if (mopa_initialized) {
-    // Normalize spectrum for MOPA (RMS normalization)
     normalize_spectrum();
-
-    // Compute PDF map
     compute_pdf_map();
-
-    // Extract IAS estimate
     mopa_current_ias = extract_ias();
-    mopa_prev_ias = mopa_current_ias;
     mopa_ias_ready = 1;
   }
 }
@@ -221,14 +222,13 @@ static void normalize_spectrum(void) {
   float32_t sum_sq = 0.0f;
   uint16_t n_bins = FFT_SIZE / 2;
 
-  /* Calculate sum of squares */
   for (uint16_t i = 0; i < n_bins; i++) {
     sum_sq += fft_magnitude[i] * fft_magnitude[i];
   }
 
-  /* Calculate RMS and normalize */
   float32_t rms;
   arm_sqrt_f32(sum_sq / (float32_t)n_bins, &rms);
+  mopa_frame_rms = rms;
 
   if (rms > 1e-10f) {
     float32_t inv_rms = 1.0f / rms;
@@ -266,16 +266,13 @@ static float32_t interp_spectrum(float32_t freq) {
   return v0 + t * (v1 - v0);
 }
 
-/* Compute PDF map for all omega candidates */
 static void compute_pdf_map(void) {
   float32_t max_log = -1e30f;
 
-  /* Compute log-PDF for each omega candidate */
   for (uint16_t i = 0; i < N_OMEGA; i++) {
     float32_t w = mopa_omega[i];
     float32_t log_pdf = 0.0f;
 
-    /* Sum log of spectrum values at harmonic frequencies */
     for (uint8_t o = 0; o < N_ORDERS; o++) {
       float32_t freq = mopa_orders[o] * w;
       if (freq < spectrum_max_freq) {
@@ -291,7 +288,6 @@ static void compute_pdf_map(void) {
     }
   }
 
-  /* Convert to linear scale and normalize */
   float32_t sum = 0.0f;
   for (uint16_t i = 0; i < N_OMEGA; i++) {
     float32_t val = expf(mopa_pdf[i] - max_log);
@@ -307,37 +303,84 @@ static void compute_pdf_map(void) {
   }
 }
 
-/* Extract IAS estimate using Gaussian prior smoothing */
+static float32_t rms_to_omega(float32_t rms) {
+  float32_t ratio = rms / RMS_MAX;
+  if (ratio < 0.0f) ratio = 0.0f;
+  if (ratio > 1.0f) ratio = 1.0f;
+  return MIN_OMEGA + (MAX_OMEGA - MIN_OMEGA) * ratio;
+}
+
 static float32_t extract_ias(void) {
   float32_t max_val = 0.0f;
   uint16_t peak_idx = 0;
+  float32_t raw_ias;
 
   if (mopa_prev_ias == 0.0f) {
-    /* First frame: simple argmax */
     for (uint16_t i = 0; i < N_OMEGA; i++) {
       if (mopa_pdf[i] > max_val) {
         max_val = mopa_pdf[i];
         peak_idx = i;
       }
     }
+    raw_ias = mopa_omega[peak_idx];
   } else {
-    /* Subsequent frames: apply Gaussian prior biasing */
-    float32_t sigma_sq_2 = 2.0f * SIGMA_HZ * SIGMA_HZ;
+    float32_t t_sigma_sq_2 = 2.0f * TRACKING_SIGMA * TRACKING_SIGMA;
+    float32_t omega_rms = rms_to_omega(mopa_frame_rms);
 
-    for (uint16_t i = 0; i < N_OMEGA; i++) {
-      float32_t w = mopa_omega[i];
-      float32_t diff = w - mopa_prev_ias;
-      float32_t gaussian = expf(-(diff * diff) / sigma_sq_2);
-      mopa_biased_pdf[i] = mopa_pdf[i] * (1.0f + PRIOR_WEIGHT * gaussian);
+    float32_t disagreement = mopa_prev_ias - omega_rms;
+    if (disagreement < 0.0f) disagreement = -disagreement;
 
-      if (mopa_biased_pdf[i] > max_val) {
-        max_val = mopa_biased_pdf[i];
-        peak_idx = i;
+    if (disagreement > DISAGREE_THRESHOLD) {
+      float32_t r_sigma_sq_2 = 2.0f * RMS_SIGMA * RMS_SIGMA;
+      max_val = 0.0f;
+      for (uint16_t i = 0; i < N_OMEGA; i++) {
+        float32_t w = mopa_omega[i];
+        float32_t t_diff = w - mopa_prev_ias;
+        float32_t tracking_g = expf(-(t_diff * t_diff) / t_sigma_sq_2);
+        float32_t r_diff = w - omega_rms;
+        float32_t rms_g = expf(-(r_diff * r_diff) / r_sigma_sq_2);
+        mopa_biased_pdf[i] = mopa_pdf[i] * (1.0f + tracking_g * TRACKING_WEIGHT) * (1.0f + rms_g * RMS_WEIGHT);
+        if (mopa_biased_pdf[i] > max_val) {
+          max_val = mopa_biased_pdf[i];
+          peak_idx = i;
+        }
+      }
+    } else {
+      max_val = 0.0f;
+      for (uint16_t i = 0; i < N_OMEGA; i++) {
+        float32_t w = mopa_omega[i];
+        float32_t t_diff = w - mopa_prev_ias;
+        float32_t tracking_g = expf(-(t_diff * t_diff) / t_sigma_sq_2);
+        mopa_biased_pdf[i] = mopa_pdf[i] * (1.0f + tracking_g * TRACKING_WEIGHT);
+        if (mopa_biased_pdf[i] > max_val) {
+          max_val = mopa_biased_pdf[i];
+          peak_idx = i;
+        }
       }
     }
+    raw_ias = mopa_omega[peak_idx];
   }
 
-  return mopa_omega[peak_idx];
+  mopa_prev_ias = raw_ias;
+
+  uint8_t should_be_zero = (mopa_frame_rms < AMPLITUDE_THRESHOLD) ? 1 : 0;
+
+  if (should_be_zero) {
+    mopa_consecutive_nonzero = 0;
+    mopa_was_zero = 1;
+    return 0.0f;
+  }
+
+  if (mopa_was_zero) {
+    mopa_consecutive_nonzero++;
+    if (mopa_consecutive_nonzero >= WAIT_STEPS) {
+      mopa_was_zero = 0;
+      return raw_ias;
+    }
+    return 0.0f;
+  }
+
+  return raw_ias;
 }
 
 /* USER CODE END 0 */
@@ -406,11 +449,6 @@ int main(void)
     Error_Handler();
   }
 
-  {
-    const char *msg = "MOPA algorithm initialized\r\n";
-    HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
-  }
-
   // Calibrate ADC
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_CALIB_OFFSET, ADC_SINGLE_ENDED);
 
@@ -427,13 +465,16 @@ int main(void)
   {
     if (mopa_ias_ready) {
       mopa_ias_ready = 0;
-      // Convert float to integer 
+      uint32_t tick = HAL_GetTick();
       int ias_int = (int)mopa_current_ias;
       int ias_frac = (int)((mopa_current_ias - ias_int) * 100);
       if (ias_frac < 0) ias_frac = -ias_frac;
+      int rms_int = (int)mopa_frame_rms;
+      int rms_frac = (int)((mopa_frame_rms - rms_int) * 100);
+      if (rms_frac < 0) rms_frac = -rms_frac;
 
-      char uart_buf[32];
-      int len = sprintf(uart_buf, "IAS: %d.%02d Hz\r\n", ias_int, ias_frac);
+      char uart_buf[64];
+      int len = sprintf(uart_buf, "%lu,%d.%02d,%d.%02d\n", tick, ias_int, ias_frac, rms_int, rms_frac);
       HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)uart_buf, len, HAL_MAX_DELAY);
     }
 
