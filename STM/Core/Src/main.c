@@ -162,9 +162,9 @@ void process_fft(uint16_t* input, uint32_t offset)
       old_data_offset = 0;
   }
 
-  /* Construct Input Buffer: [OLD DATA] + [NEW DATA] */
+  // Construct Input Buffer: [OLD DATA] + [NEW DATA] 
 
-  // First, copy data without windowing to calculate DC offset
+  // First copy data without windowing to calculate DC offset
   float32_t dc_sum = 0.0f;
   for (uint32_t i = 0; i < half_size; i++)
   {
@@ -207,7 +207,7 @@ void process_fft(uint16_t* input, uint32_t offset)
   }
 }
 
-/* Initialize MOPA algorithm - compute omega vector and spectrum parameters */
+// Initialize MOPA algorithm: compute omega vector and spectrum parameters 
 static void mopa_init(void) {
   /* Compute omega candidate vector */
   float32_t d_omega = (MAX_OMEGA - MIN_OMEGA) / (float32_t)(N_OMEGA - 1);
@@ -215,14 +215,14 @@ static void mopa_init(void) {
     mopa_omega[i] = MIN_OMEGA + i * d_omega;
   }
 
-  /* Compute spectrum parameters based on FFT size and sample rate */
+  // Compute spectrum parameters based on FFT size and sample rate 
   spectrum_df = SAMPLE_RATE / (float32_t)FFT_SIZE;
   spectrum_max_freq = spectrum_df * ((float32_t)FFT_SIZE / 2.0f - 1.0f);
 
   mopa_initialized = 1;
 }
 
-/* Normalize the magnitude spectrum by its RMS value */
+// Normalize the magnitude spectrum by its RMS value 
 static void normalize_spectrum(void) {
   float32_t sum_sq = 0.0f;
   uint16_t n_bins = FFT_SIZE / 2;
@@ -243,9 +243,10 @@ static void normalize_spectrum(void) {
   }
 }
 
-/* Linear interpolation of spectrum at a given frequency */
+// Linear interpolation of spectrum at a provided freqouency
+// This is used in compute_pdf_map to read spectrum magnitudes at harmonic frequencies that fall between FFT bins
 static float32_t interp_spectrum(float32_t freq) {
-  /* Handle boundary cases */
+  // Handle boundary cases
   if (freq <= 0.0f) {
     return fft_magnitude[0];
   }
@@ -253,7 +254,7 @@ static float32_t interp_spectrum(float32_t freq) {
     return fft_magnitude[FFT_SIZE / 2 - 1];
   }
 
-  /* Calculate bin index */
+  // Calculate bin index from frequency
   float32_t bin_float = freq / spectrum_df;
   uint16_t idx = (uint16_t)bin_float;
 
@@ -261,7 +262,7 @@ static float32_t interp_spectrum(float32_t freq) {
     idx = FFT_SIZE / 2 - 2;
   }
 
-  /* Linear interpolation */
+  // Linear interpolation between bins
   float32_t f0 = idx * spectrum_df;
   float32_t f1 = (idx + 1) * spectrum_df;
   float32_t v0 = fft_magnitude[idx];
@@ -271,9 +272,11 @@ static float32_t interp_spectrum(float32_t freq) {
   return v0 + t * (v1 - v0);
 }
 
+// Compute the PDF for the current time frame from the spectrum and harmonic orders
 static void compute_pdf_map(void) {
   float32_t max_log = -1e30f;
 
+  // Accumulate log space PDF by summing log magnitudes at each harmonic order
   for (uint16_t i = 0; i < N_OMEGA; i++) {
     float32_t w = mopa_omega[i];
     float32_t log_pdf = 0.0f;
@@ -293,6 +296,7 @@ static void compute_pdf_map(void) {
     }
   }
 
+  // Convert from log space to linear and normalize
   float32_t sum = 0.0f;
   for (uint16_t i = 0; i < N_OMEGA; i++) {
     float32_t val = expf(mopa_pdf[i] - max_log);
@@ -308,6 +312,7 @@ static void compute_pdf_map(void) {
   }
 }
 
+// Linear mapping of RMS value to angular speed
 static float32_t rms_to_omega(float32_t rms) {
   float32_t ratio = rms / RMS_MAX;
   if (ratio < 0.0f) ratio = 0.0f;
@@ -315,11 +320,13 @@ static float32_t rms_to_omega(float32_t rms) {
   return MIN_OMEGA + (MAX_OMEGA - MIN_OMEGA) * ratio;
 }
 
+// Estimate the instantaneous angular speed from the PDF using tracking and RMS bias
 static float32_t extract_ias(void) {
   float32_t max_val = 0.0f;
   uint16_t peak_idx = 0;
   float32_t raw_ias;
 
+  // First frame has no previous estimate so pick the unbiased PDF peak
   if (mopa_prev_ias == 0.0f) {
     for (uint16_t i = 0; i < N_OMEGA; i++) {
       if (mopa_pdf[i] > max_val) {
@@ -336,6 +343,7 @@ static float32_t extract_ias(void) {
     if (disagreement < 0.0f) disagreement = -disagreement;
 
     if (disagreement > DISAGREE_THRESHOLD) {
+      // Bias the PDF with tracking and RMS Gaussians to correct tracking 
       float32_t r_sigma_sq_2 = 2.0f * RMS_SIGMA * RMS_SIGMA;
       max_val = 0.0f;
       for (uint16_t i = 0; i < N_OMEGA; i++) {
@@ -351,6 +359,7 @@ static float32_t extract_ias(void) {
         }
       }
     } else {
+      // Bias the PDF with tracking Gaussian only to enforce temporal continuity
       max_val = 0.0f;
       for (uint16_t i = 0; i < N_OMEGA; i++) {
         float32_t w = mopa_omega[i];
@@ -368,6 +377,7 @@ static float32_t extract_ias(void) {
 
   mopa_prev_ias = raw_ias;
 
+  // Zero out IAS when the signal amplitude is below the threshold
   uint8_t should_be_zero = (mopa_frame_rms < AMPLITUDE_THRESHOLD) ? 1 : 0;
 
   if (should_be_zero) {
@@ -376,6 +386,7 @@ static float32_t extract_ias(void) {
     return 0.0f;
   }
 
+  // Wait for a few consecutive nonzero frames before outputting IAS (hysteresis)
   if (mopa_was_zero) {
     mopa_consecutive_nonzero++;
     if (mopa_consecutive_nonzero >= WAIT_STEPS) {
