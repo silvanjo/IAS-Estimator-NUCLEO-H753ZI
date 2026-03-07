@@ -1,8 +1,10 @@
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import stft
 from scipy.interpolate import interp1d
 
+# Read csv file 
 def read_signal(signal_path):
     timestamps, signal = [], []
     with open(signal_path) as file:
@@ -18,6 +20,7 @@ def read_signal(signal_path):
     print(f"Red Signal: length: {timestamps[-1]:.2f}, sample rate {fs:.0f}")
     return timestamps, signal, fs
 
+# Compute the Short-Time Fourier Transform and return the magnitude spectrum
 def compute_stft(signal, fs, nperseg=512, noverlap=None):
     if noverlap is None:
         noverlap = nperseg // 2
@@ -25,10 +28,13 @@ def compute_stft(signal, fs, nperseg=512, noverlap=None):
     Sxx = np.abs(Zxx)
     return  f, t, Sxx
 
+# Normalize the spectrum by its RMS value
+# this ensures the PDF computation is independent of the signals amplitude
 def normalize_spectrum(Sxx):
     rms = np.sqrt(np.mean(Sxx**2))
     return Sxx / rms if rms > 0 else Sxx
 
+# Compute the probability density function for a single time frame from the spectrum and harmonic orders
 def compute_pdf(Axx, f, orders, min_omega, max_omega, nomega=1000):
     f_max = f[-1]
     omega = np.linspace(min_omega, max_omega, nomega)
@@ -49,6 +55,7 @@ def compute_pdf(Axx, f, orders, min_omega, max_omega, nomega=1000):
 
     return normalized_pdf, omega
 
+# Compute the PDF map over all time frames of the spectrogram
 def compute_pdf_map(Sxx, f, orders, min_omega, max_omega):
     _, n_time = Sxx.shape
 
@@ -64,9 +71,14 @@ def compute_pdf_map(Sxx, f, orders, min_omega, max_omega):
 
     return pdf_map, omega
 
+# Linear mapping of RMS value to angular speed
 def rms_to_omega(rms, min_omega, max_omega, rms_max=2.0):
-    return min_omega + (max_omega - min_omega) * np.clip(rms / rms_max, 0, 1)
+    normalized_rms = np.clip(rms / rms_max, 0, 1)
+    omega_range = max_omega - min_omega
+    omega = min_omega + omega_range * normalized_rms
+    return omega
 
+# Estimate the instantaneous angular speed from the PDF map 
 def compute_ias(pdf_map, omega, Sxx, min_omega=5, max_omega=24,
                 t_sigma=0.5, t_weight=40.0,
                 r_sigma=1.0, r_weight=15.0, disagree_threshold=3.0,
@@ -81,14 +93,19 @@ def compute_ias(pdf_map, omega, Sxx, min_omega=5, max_omega=24,
     raw_ias[0] = omega[np.argmax(pdf_map[:,0])]
 
     for i in range(1, n_time):
+        # Bias the PDF with Gaussians centered on previous estimates because of the motors inertia
         tracking_g = np.exp(-(omega - raw_ias[i-1])**2 / (2*t_sigma**2))
 
         disagreement = abs(raw_ias[i-1] - omega_from_rms[i])
         if disagreement > disagree_threshold:
+            # Add an additional RMS-based Gaussian bias to correct tracking drift if ias deviates a lot from rms to ias estimate
             rms_g = np.exp(-(omega - omega_from_rms[i])**2 / (2*r_sigma**2))
-            biased_pdf = pdf_map[:,i] * (1 + tracking_g * t_weight) * (1 + rms_g * r_weight)
+            tracking_bias = 1 + tracking_g * t_weight
+            rms_bias = 1 + rms_g * r_weight
+            biased_pdf = pdf_map[:,i] * tracking_bias * rms_bias
         else:
-            biased_pdf = pdf_map[:,i] * (1 + tracking_g * t_weight)
+            tracking_bias = 1 + tracking_g * t_weight
+            biased_pdf = pdf_map[:,i] * tracking_bias
 
         raw_ias[i] = omega[np.argmax(biased_pdf)]
 
@@ -115,9 +132,12 @@ def compute_ias(pdf_map, omega, Sxx, min_omega=5, max_omega=24,
     return ias
 
 if __name__ == "__main__":
-    timestamps, signal, fs = read_signal("../../mopa_input/rampenfunktion_beschleunigung_2khz.csv")
-    # timestamps, signal, fs = read_signal("../../mopa_input/treppenfunktion_beschleunigung_2khz.csv")
-    # timestamps, signal, fs = read_signal("../../mopa_input/konstant.csv")
+    if len(sys.argv) < 2:
+        print("Usage: python mopa.py <signal_csv_path>")
+        sys.exit(1)
+
+    signal_path = sys.argv[1]
+    timestamps, signal, fs = read_signal(signal_path)
 
     plt.figure()
     plt.plot(timestamps, signal)
@@ -143,7 +163,7 @@ if __name__ == "__main__":
     ias = compute_ias(pdf_map, omega, Sxx_normalized, min_omega=min_omega, max_omega=max_omega)
 
     # Save IAS speed estimation to CSV file
-    output_path = "ias_speed_estimation_rampenfunktion.csv"
+    output_path = "output.csv"
     np.savetxt(output_path, np.column_stack((t, ias)), delimiter=',', header='time,ias', comments='')
     print(f"IAS speed estimation saved to {output_path}")
 
