@@ -53,7 +53,7 @@
 #define RMS_MAX 320.0f
 #define DISAGREE_THRESHOLD 3.0f
 #define AMPLITUDE_THRESHOLD 20.0f
-#define WAIT_STEPS 3
+#define WAIT_STEPS 1
 
 /* Voltage measurement */
 #define VREF 3.3f

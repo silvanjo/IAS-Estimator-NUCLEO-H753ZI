@@ -82,7 +82,7 @@ def rms_to_omega(rms, min_omega, max_omega, rms_max=2.0):
 def compute_ias(pdf_map, omega, Sxx, min_omega=5, max_omega=24,
                 t_sigma=0.5, t_weight=40.0,
                 r_sigma=1.0, r_weight=15.0, disagree_threshold=3.0,
-                rms_threshold=0.18, wait_steps=3):
+                rms_threshold=0.18, wait_steps=1):
     _, n_time = pdf_map.shape
     ias = np.zeros(n_time)
 
