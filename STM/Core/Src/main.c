@@ -274,34 +274,25 @@ static float32_t interp_spectrum(float32_t freq) {
 
 // Compute the PDF for the current time frame from the spectrum and harmonic orders
 static void compute_pdf_map(void) {
-  float32_t max_log = -1e30f;
-
-  // Accumulate log space PDF by summing log magnitudes at each harmonic order
   for (uint16_t i = 0; i < N_OMEGA; i++) {
     float32_t w = mopa_omega[i];
-    float32_t log_pdf = 0.0f;
+    float32_t pdf = 1.0f;
 
     for (uint8_t o = 0; o < N_ORDERS; o++) {
       float32_t freq = mopa_orders[o] * w;
       if (freq < spectrum_max_freq) {
         float32_t s = interp_spectrum(freq);
         if (s < 1e-10f) s = 1e-10f;
-        log_pdf += logf(s);
+        pdf *= s;
       }
     }
 
-    mopa_pdf[i] = log_pdf;
-    if (log_pdf > max_log) {
-      max_log = log_pdf;
-    }
+    mopa_pdf[i] = pdf;
   }
 
-  // Convert from log space to linear and normalize
   float32_t sum = 0.0f;
   for (uint16_t i = 0; i < N_OMEGA; i++) {
-    float32_t val = expf(mopa_pdf[i] - max_log);
-    mopa_pdf[i] = val;
-    sum += val;
+    sum += mopa_pdf[i];
   }
 
   if (sum > 0.0f) {
